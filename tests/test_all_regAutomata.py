@@ -1,8 +1,10 @@
 """
-regAutomata — example usage
+regAutomata — comprehensive usage examples.
 Demonstrates every public parameter across all regression types and datasets.
+Run:  python test_all_regAutomata.py
 """
-
+import pandas as pd
+from pathlib import Path
 from regAutomata import (
     run_regAutomata,
     predictRegAutomata,
@@ -13,8 +15,7 @@ from regAutomata import (
 )
 
 
-# ── 1. Quick single run ────────────────────────────────────────────────────────
-# Minimal call — only required parameters, everything else uses defaults.
+# ── 1. Minimal call ───────────────────────────────────────────────────────────
 
 artifacts = run_regAutomata(
     dataset_csv="data/iris/iris_dataset.csv",
@@ -23,97 +24,75 @@ artifacts = run_regAutomata(
 )
 
 
-# ── 2. Full parameter run ──────────────────────────────────────────────────────
-# Every parameter explicitly set so you can see what each one does.
+# ── 2. Full parameter call ────────────────────────────────────────────────────
 
 artifacts = run_regAutomata(
-    # --- Data ---
-    dataset_csv="data/iris/iris_dataset.csv",   # Path to any CSV file
+    # Data
+    dataset_csv="data/iris/iris_dataset.csv",
 
-    # --- Automaton definition ---
-    qS="sepal length (cm)",                     # Initial state  (must be a column name)
-    qF="petal width (cm)",                      # Final state    (must be a column name)
+    # Automaton definition
+    qS="sepal length (cm)",         # initial state  (must be a column name)
+    qF="petal width (cm)",          # final state    (must be a column name)
 
-    # --- Regression ---
-    # One of: "linear" | "polynomial" | "cubic" | "loess" | "ridge" | "lasso" | "svr" | "gbr"
+    # Regression: linear | polynomial | cubic | loess | ridge | lasso | svr | gbr
     regression_type="linear",
 
-    # --- Correlation ---
-    # One of: "pearson" | "spearman" | "kendall"
-    # If None, a sensible default is chosen automatically per regression type.
+    # Correlation: pearson | spearman | kendall  (None = auto per regression type)
     correlation_method="pearson",
 
-    # --- Graph scope ---
-    # "full" — show all explored paths in the HTML
-    # "best" — show only the highest-correlation path
+    # Graph scope: "full" = all explored paths  |  "best" = highest-corr path only
     visualization_type="full",
 
-    # --- HTML output ---
-    output_html="regAutomata_linear_full.html",  # Path for the interactive graph
-    open_html=False,                              # Set True to open browser automatically
+    # Output root (default: "regAutomata_results")
+    output_dir="regAutomata_results",
+    open_html=False,
 
-    # --- Artifacts ---
-    # Saves two .pkl files:
-    #   regAutomata_linear.pkl        — full graph artifacts
-    #   regAutomata_linear_best.pkl   — best-path-only artifacts (used for prediction)
-    save_artifacts_path="regAutomata_linear.pkl",
-
-    # --- PNG export (requires: pip install playwright && playwright install chromium) ---
-    save_png=False,                              # Set True to capture HTML → PNG
+    # PNG export (requires: pip install playwright && playwright install chromium)
+    save_png=False,
     png_kwargs={
-        "out_png": "regAutomata_linear_full.png",
-        "extra_left_px": 60,
-        "extra_right_px": 60,
-        "extra_top_px": 60,
-        "extra_bottom_px": 60,
-        "device_scale": 2,                       # 2 = 2× pixel density (retina quality)
-        "wait_after_load": 1.0,                  # Seconds to wait after vis.js renders
+        "pad_h": 120,           # horizontal padding — keeps node labels unclipped
+        "pad_v": 40,            # vertical padding
+        "device_scale": 2,      # 2x pixel density (retina quality)
+        "wait_after_load": 1.0,
     },
 
-    # --- Pre-filter ---
-    # True  — removes low-correlation pairs before path generation.
-    #         Threshold: |corr| >= (max + mean) / 2  (adaptive, no fixed cutoff)
-    #         Strongly recommended for datasets with more than ~6 columns.
-    # False — explore all possible paths (factorial growth, slow on wide datasets)
+    # Pre-filter: removes low-correlation pairs before path generation.
+    # Threshold: |corr| >= (max + mean) / 2  (adaptive, no fixed cutoff).
+    # Strongly recommended for datasets with more than ~6 columns.
     use_prefilter=True,
 )
 
+run_dir = Path(artifacts["run_dir"])
 print("Best path:", artifacts["paths"][artifacts["best_path_index"]])
-print("Regression:", artifacts["regression_type"])
-print("Correlation method:", artifacts["correlation_method"])
+print("Run folder:", run_dir)
 
 
-# ── 3. Prediction from saved artifacts ────────────────────────────────────────
-# Always load the *_best.pkl file for prediction — it contains only the
+# ── 3. Prediction from saved artifact file ────────────────────────────────────
+# Always use artifacts_best.pkl for prediction — it contains only the
 # highest-correlation path and its fitted models.
 
 seq, final_value = predictRegAutomata(
-    artifacts_or_path="regAutomata_linear_best.pkl",  # Path or already-loaded dict
-    x0=5.1,                                           # Starting value at qS
-    qS="sepal length (cm)",                           # Must match the artifact's qS
-
-    # Optional: save a new HTML/PNG with predicted p-values annotated on each node
-    save_html=None,           # e.g. "prediction_result.html"
-    save_png_path=None,       # e.g. "prediction_result.png"  (requires Playwright)
+    artifacts_or_path=str(run_dir / "artifacts_best.pkl"),
+    x0=5.1,
+    qS="sepal length (cm)",
+    save_html=None,       # e.g. str(run_dir / "prediction.html")
+    save_png_path=None,   # e.g. str(run_dir / "prediction.png")
 )
 
 print("\nPrediction sequence:")
 for a1, a2, val in seq:
-    print(f"  {a1}  →  {a2}  :  {val:.4f}")
+    print(f"  {a1}  ->  {a2}  :  {val:.4f}")
 print(f"Final predicted value at '{artifacts['qF']}': {final_value:.4f}")
 
 
-# ── 4. Prediction from an already-loaded artifact dict ────────────────────────
-# You can also pass the dict returned by run_regAutomata or load_artifacts
-# directly — no file I/O needed.
+# ── 4. Prediction from already-loaded dict ────────────────────────────────────
 
-loaded = load_artifacts("regAutomata_linear_best.pkl")
+loaded = load_artifacts(str(run_dir / "artifacts_best.pkl"))
 seq2, final2 = predictRegAutomata(loaded, x0=6.3, qS="sepal length (cm)")
-print(f"\nDirect dict prediction  x0=6.3  →  {final2:.4f}")
+print(f"\nDirect dict prediction  x0=6.3  ->  {final2:.4f}")
 
 
 # ── 5. Correlation matrix utility ─────────────────────────────────────────────
-import pandas as pd
 
 df = pd.read_csv("data/iris/iris_dataset.csv")
 for method in SUPPORTED_CORRELATION:
@@ -123,7 +102,6 @@ for method in SUPPORTED_CORRELATION:
 
 
 # ── 6. Loop over all regression types ─────────────────────────────────────────
-# Useful for comparing model quality across regression algorithms on the same data.
 
 results = {}
 for rtype in SUPPORTED_REGRESSION:
@@ -132,69 +110,43 @@ for rtype in SUPPORTED_REGRESSION:
         qS="sepal length (cm)",
         qF="petal width (cm)",
         regression_type=rtype,
-        save_artifacts_path=f"artifacts_{rtype}.pkl",
         save_png=False,
         use_prefilter=True,
     )
-    seq, final = predictRegAutomata(
-        f"artifacts_{rtype}_best.pkl",
-        x0=5.1,
-        qS="sepal length (cm)",
-    )
+    rd = Path(art["run_dir"])
+    seq, final = predictRegAutomata(str(rd / "artifacts_best.pkl"), x0=5.1, qS="sepal length (cm)")
     best_path = art["paths"][art["best_path_index"]]
     results[rtype] = {"path": best_path, "prediction": round(final, 4)}
     print(f"[{rtype:12s}]  path={best_path}  pred={final:.4f}")
 
 print("\nSummary:")
 for rtype, info in results.items():
-    print(f"  {rtype:12s}  →  {info['prediction']}")
+    print(f"  {rtype:12s}  ->  {info['prediction']}")
 
 
 # ── 7. Three datasets — thesis verification ───────────────────────────────────
 
 DATASETS = [
-    {
-        "dataset_csv": "data/iris/iris_dataset.csv",
-        "qS": "sepal length (cm)",
-        "qF": "petal width (cm)",
-        "x0": 5.1,
-    },
-    {
-        "dataset_csv": "data/wine/wine_dataset.csv",
-        "qS": "alcohol",
-        "qF": "proline",
-        "x0": 13.0,
-    },
-    {
-        "dataset_csv": "data/diabetes/diabetes_dataset.csv",
-        "qS": "bmi",
-        "qF": "target",
-        "x0": 0.05,
-    },
+    ("data/iris/iris_dataset.csv",         "sepal length (cm)", "petal width (cm)", 5.1),
+    ("data/wine/wine_dataset.csv",         "alcohol",           "proline",          13.0),
+    ("data/diabetes/diabetes_dataset.csv", "bmi",               "target",           0.05),
 ]
 
-for ds in DATASETS:
+for csv, qS, qF, x0 in DATASETS:
     print(f"\n{'─'*50}")
-    print(f"Dataset : {ds['dataset_csv']}")
-    print(f"Path    : {ds['qS']}  →  {ds['qF']}")
+    print(f"Dataset : {csv}  |  {qS}  ->  {qF}")
 
     art = run_regAutomata(
-        dataset_csv=ds["dataset_csv"],
-        qS=ds["qS"],
-        qF=ds["qF"],
+        dataset_csv=csv,
+        qS=qS,
+        qF=qF,
         regression_type="polynomial",
         visualization_type="best",
-        output_html=f"graph_{ds['qS'].split()[0]}.html",
-        save_artifacts_path=f"artifacts_{ds['qS'].split()[0]}.pkl",
         save_png=False,
         use_prefilter=True,
     )
-
-    seq, final = predictRegAutomata(
-        f"artifacts_{ds['qS'].split()[0]}_best.pkl",
-        x0=ds["x0"],
-        qS=ds["qS"],
-    )
-
+    rd = Path(art["run_dir"])
+    seq, final = predictRegAutomata(str(rd / "artifacts_best.pkl"), x0=x0, qS=qS)
     print(f"Best path : {art['paths'][art['best_path_index']]}")
     print(f"Prediction: {final:.4f}")
+    print(f"Output    : {rd}")

@@ -1,9 +1,11 @@
-# test_all_regression_types.py
+"""
+Regression type sweep — tests all 8 regression types on the iris dataset.
+Run:  python test_all_regressions_types.py
+"""
+from pathlib import Path
 from regAutomata import run_regAutomata, predictRegAutomata, SUPPORTED_REGRESSION
 
-REGRESSIONS = SUPPORTED_REGRESSION  # all 8
-
-for rtype in REGRESSIONS:
+for rtype in SUPPORTED_REGRESSION:
     print(f"\n{'─'*40}")
     print(f"Testing: {rtype}")
     try:
@@ -12,15 +14,14 @@ for rtype in REGRESSIONS:
             qS="sepal length (cm)",
             qF="petal width (cm)",
             regression_type=rtype,
-            save_artifacts_path=f"artifacts_{rtype}.pkl",
             save_png=False,
         )
+        run_dir = Path(artifacts["run_dir"])
         seq, final = predictRegAutomata(
-            f"artifacts_{rtype}_best.pkl",
+            str(run_dir / "artifacts_best.pkl"),
             x0=5.0,
             qS="sepal length (cm)",
         )
-        print(f"  ✓  final prediction: {final:.4f}")
+        print(f"  OK  best={artifacts['paths'][artifacts['best_path_index']]}  pred={final:.4f}")
     except Exception as e:
-        print(f"  ✗  {e}")
-        
+        print(f"  FAIL  {e}")

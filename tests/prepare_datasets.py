@@ -1,4 +1,4 @@
-# prepare_datasets.py — run once to create all 3
+# prepare_datasets.py — run once to create all 3 sklearn datasets
 from sklearn.datasets import load_iris, load_wine, load_diabetes
 import pandas as pd, os
 

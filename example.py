@@ -1,25 +1,51 @@
-from regAutomata import *
+"""
+Singular dataset test — run one dataset with one regression type.
+Edit the CONFIG block and run:  python test_singular_dataset.py
+"""
+import time
+import pandas as pd
+from pathlib import Path
+from regAutomata import run_regAutomata, predictRegAutomata
 
+# ── CONFIG ────────────────────────────────────────────────────────────────────
+
+CSV        = "data/iris/iris_dataset.csv"
+QS         = "sepal length (cm)"
+QF         = "petal width (cm)"
+REGRESSION = "linear"   # linear | polynomial | cubic | loess | ridge | lasso | svr | gbr
+OPEN_HTML  = False       # set True to open browser when done
+
+# ── Run ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    t0 = time.time()
+    print(f"Dataset   : {CSV}")
+    print(f"Path      : {QS}  ->  {QF}")
+    print(f"Regression: {REGRESSION}\n")
+
     artifacts = run_regAutomata(
-        dataset_csv="data/iris/iris_dataset.csv",
-        qS="sepal length (cm)",
-        qF="petal width (cm)",
-        regression_type="linear",
+        dataset_csv=CSV,
+        qS=QS,
+        qF=QF,
+        regression_type=REGRESSION,
         visualization_type="full",
-        output_html="regAutomata_linear_full.html",
-        open_html=False,
-        save_artifacts_path="art_linear_full.pkl",
-        save_png=True,
-        png_kwargs={"out_png": "regAutomata_linear_full.png", "extra_left_px": 50, "extra_right_px": 50, "extra_bottom_px": 50, "device_scale": 3},
+        open_html=OPEN_HTML,
+        save_png=True,    # requires: pip install playwright && playwright install chromium
+        use_prefilter=True,
     )
+
+    run_dir = Path(artifacts["run_dir"])
+    x0 = float(pd.read_csv(CSV)[QS].mean())
     seq, final = predictRegAutomata(
-        "art_linear_full_best.pkl",
-        x0=5.0,
-        qS="sepal length (cm)",
-        save_html="prediction_best.html",
-        save_png_path="prediction_best.png",
+        str(run_dir / "artifacts_best.pkl"),
+        x0=x0,
+        qS=QS,
     )
-    print("Predikčná sekvencia:", seq)
-    print("Finálna hodnota:", final)
+
+    print(f"\nBest path : {artifacts['paths'][artifacts['best_path_index']]}")
+    print(f"Input x0  : {x0:.4f}  ({QS})")
+    for a1, a2, v in seq:
+        print(f"  {a1}  ->  {a2}  :  {v:.4f}")
+    print(f"Final pred: {final:.4f}  ({QF})")
+    print(f"\nDone in {time.time() - t0:.1f}s")
+    print(f"Output folder: {run_dir}")

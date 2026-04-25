@@ -1,4 +1,8 @@
-# test_smoke.py
+"""
+Smoke test — quickest sanity check: one dataset, linear regression, predict.
+Run:  python test_smoke.py
+"""
+from pathlib import Path
 from regAutomata import run_regAutomata, predictRegAutomata
 
 artifacts = run_regAutomata(
@@ -7,19 +11,20 @@ artifacts = run_regAutomata(
     qF="petal width (cm)",
     regression_type="linear",
     visualization_type="full",
-    output_html="test_linear.html",
-    save_artifacts_path="test_linear.pkl",
     open_html=False,
-    save_png=True,         # no Playwright needed
+    save_png=False,     # set True if Playwright is installed
     use_prefilter=True,
 )
 
+run_dir = Path(artifacts["run_dir"])
 seq, final = predictRegAutomata(
-    "test_linear_best.pkl",
+    str(run_dir / "artifacts_best.pkl"),
     x0=5.0,
     qS="sepal length (cm)",
 )
+
 print("Path sequence:")
 for a1, a2, val in seq:
-    print(f"  {a1} → {a2} : {val:.4f}")
+    print(f"  {a1} -> {a2} : {val:.4f}")
 print(f"Final predicted value: {final:.4f}")
+print(f"Output folder: {run_dir}")

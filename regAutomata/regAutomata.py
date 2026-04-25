@@ -15,6 +15,7 @@ import copy
 import itertools
 import os
 import pickle
+import shutil
 import time
 import warnings
 import webbrowser
@@ -41,9 +42,8 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-DEFAULT_HTML = "regAutomata.html"
-OUTPUT_DIR = Path("regAutomata_output")
-OUTPUT_DIR.mkdir(exist_ok=True)
+RESULTS_DIR = Path("regAutomata_results")
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 REGRESSION_CORR_DEFAULTS: Dict[str, str] = {
     "linear":     "pearson",
@@ -56,7 +56,7 @@ REGRESSION_CORR_DEFAULTS: Dict[str, str] = {
     "gbr":        "spearman",
 }
 
-SUPPORTED_REGRESSION = list(REGRESSION_CORR_DEFAULTS.keys())
+SUPPORTED_REGRESSION  = list(REGRESSION_CORR_DEFAULTS.keys())
 SUPPORTED_CORRELATION = ("pearson", "spearman", "kendall")
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -66,9 +66,9 @@ def calculate_rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 
 
 def _ensure_parent_dir(path: str) -> None:
-    dirname = os.path.dirname(path)
-    if dirname:
-        os.makedirs(dirname, exist_ok=True)
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
 
 
 def calculate_correlation(x, y, method: str) -> float:
@@ -92,7 +92,7 @@ def encode_image_from_file(filename: str) -> str:
 def prefilter_pairs(df: pd.DataFrame, method: str = "pearson") -> Set[Tuple[str, str]]:
     """
     Keep only directed pairs (a, b) where |corr(a,b)| >= (max + mean) / 2.
-    Reduces the number of paths on wide datasets without a fixed cutoff.
+    Reduces path count on wide datasets without a fixed cutoff.
     """
     num_cols = list(df.select_dtypes(include=[np.number]).columns)
     if len(num_cols) < 2:
@@ -100,7 +100,6 @@ def prefilter_pairs(df: pd.DataFrame, method: str = "pearson") -> Set[Tuple[str,
 
     abs_corr = df[num_cols].corr(method=method).abs()
     vals = [abs_corr.loc[c1, c2] for c1 in num_cols for c2 in num_cols if c1 != c2]
-
     if not vals:
         return set()
 
@@ -173,10 +172,8 @@ def predict_model(model_info: Tuple[str, object], x_vals: np.ndarray) -> np.ndar
 
     if mtype == "poly_obj":
         return params(x_vals)
-
     if mtype == "loess":
         return np.interp(x_vals, params[:, 0], params[:, 1])
-
     if mtype == "sklearn":
         model, scaler_x, scaler_y = params
         X = scaler_x.transform(x_vals.reshape(-1, 1))
@@ -192,8 +189,7 @@ def manual_eval_model(model_info: Tuple[str, object], x: float) -> float:
 # ── Regression plot ───────────────────────────────────────────────────────────
 
 def create_regression_plot(
-    x,
-    y,
+    x, y,
     xlabel: str,
     ylabel: str,
     regression_type: str = "linear",
@@ -206,14 +202,15 @@ def create_regression_plot(
     model_info = fit_model(x_arr, y_arr, regression_type)
     pred = predict_model(model_info, x_arr)
 
-    fig, ax = plt.subplots(figsize=(12, 7), dpi=150)
-    ax.scatter(x_arr, y_arr, s=60, alpha=0.65, zorder=3, label="Data")
-    x_line = np.linspace(x_arr.min(), x_arr.max(), 300)
-    ax.plot(x_line, predict_model(model_info, x_line), linewidth=2.5, color="tab:red", label=regression_type.title())
-    ax.set_xlabel(xlabel, fontsize=18, fontweight="bold")
-    ax.set_ylabel(ylabel, fontsize=18, fontweight="bold")
-    ax.tick_params(axis="both", labelsize=12)
-    ax.legend(fontsize=13)
+    fig, ax = plt.subplots(figsize=(10, 6), dpi=220)
+    ax.scatter(x_arr, y_arr, s=50, alpha=0.65, zorder=3, label="Data")
+    x_line = np.linspace(x_arr.min(), x_arr.max(), 400)
+    ax.plot(x_line, predict_model(model_info, x_line), linewidth=2.5,
+            color="tab:red", label=regression_type.title())
+    ax.set_xlabel(xlabel, fontsize=14, fontweight="bold")
+    ax.set_ylabel(ylabel, fontsize=14, fontweight="bold")
+    ax.tick_params(axis="both", labelsize=10)
+    ax.legend(fontsize=11)
     plt.tight_layout()
 
     if filename:
@@ -260,22 +257,32 @@ def build_graph(
     regression_type: str,
     visualization_type: str = "full",
     allowed_pairs: Optional[Set[Tuple[str, str]]] = None,
-) -> Tuple[nx.DiGraph, Dict[str, Tuple[str, float]], Dict[Tuple[str, str, int], Dict], List[List[str]], Optional[int]]:
+    tmp_dir: Optional[Path] = None,
+) -> Tuple[nx.DiGraph, Dict[str, Tuple[str, float]], Dict[Tuple[str, str], Dict], List[List[str]], Optional[int]]:
     """
     Build the regression automaton graph.
 
-    Node IDs are globally unique per path and step: "{attr}_p{path_idx}_s{step}"
-    for intermediate nodes and "{attr}_p{path_idx}_final" for final nodes.
-    Regression plots are cached per (a1, a2) pair and reused across paths.
+    Node ID = "{prev_node_id}__{a2}" — encodes the full path prefix so nodes
+    are only shared when the complete history of the path is identical.
+
+    Scatter PNGs are written to tmp_dir, encoded to base64 immediately, then
+    deleted. They never accumulate between calls.
     """
+    if tmp_dir is None:
+        import tempfile
+        tmp_dir = Path(tempfile.mkdtemp())
+
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
     G = nx.DiGraph()
     image_data_dict: Dict[str, Tuple[str, float]] = {}
-    models: Dict[Tuple[str, str, int], Dict] = {}
+    models: Dict[Tuple[str, str], Dict] = {}
     pair_cache: Dict[Tuple[str, str], Tuple[np.ndarray, object, float, str]] = {}
 
     paths = generate_paths(list(df.columns), qS, qF, allowed_pairs)
     best_path_idx: Optional[int] = None
     best_avg_corr: float = -1.0
+    final_node_to_path: Dict[str, int] = {}
 
     G.add_node(qS, label=qS, shape="dot", size=50)
 
@@ -286,20 +293,29 @@ def build_graph(
         for step_i in range(1, len(path)):
             a1, a2 = path[step_i - 1], path[step_i]
             is_final = (step_i == len(path) - 1)
-            node2_id = f"{a2}_p{path_idx}_final" if is_final else f"{a2}_p{path_idx}_s{step_i}"
+            node2_id = f"{prev_node_id}__{a2}__final" if is_final else f"{prev_node_id}__{a2}"
+
+            if (a1, a2) not in pair_cache:
+                tmp_png = tmp_dir / f"{a1}_to_{a2}_{regression_type}.png"
+                pred, model_info = create_regression_plot(
+                    df[a1], df[a2], a1, a2, regression_type, str(tmp_png)
+                )
+                rmse = round(calculate_rmse(df[a2].to_numpy(), pred), 4)
+                img_b64 = encode_image_from_file(str(tmp_png))
+                try:
+                    tmp_png.unlink()
+                except Exception:
+                    pass
+                pair_cache[(a1, a2)] = (pred, model_info, rmse, img_b64)
+
+            _, model_info, rmse, img_b64 = pair_cache[(a1, a2)]
 
             if node2_id not in G:
                 G.add_node(node2_id, label=a2, shape="square")
-
-                if (a1, a2) not in pair_cache:
-                    filename = str(OUTPUT_DIR / f"{a1}_to_{a2}_{regression_type}.png")
-                    pred, model_info = create_regression_plot(df[a1], df[a2], a1, a2, regression_type, filename)
-                    rmse = round(calculate_rmse(df[a2].to_numpy(), pred), 4)
-                    pair_cache[(a1, a2)] = (pred, model_info, rmse, encode_image_from_file(filename))
-
-                _, model_info, rmse, img_b64 = pair_cache[(a1, a2)]
                 image_data_dict[node2_id] = (img_b64, rmse)
-                models[(a1, a2, path_idx)] = {"model_info": model_info, "rmse": rmse}
+
+            if (a1, a2) not in models:
+                models[(a1, a2)] = {"model_info": model_info, "rmse": rmse}
 
             corr = round(calculate_correlation(df[a1], df[a2], correlation_method), 4)
             path_corrs.append(abs(corr))
@@ -311,6 +327,7 @@ def build_graph(
         G.nodes[prev_node_id]["label"] += f"\n\nμ(corr) = {avg_corr}"
         if prev_node_id in image_data_dict:
             G.nodes[prev_node_id]["label"] += f"\nRMSE = {image_data_dict[prev_node_id][1]}"
+        final_node_to_path[prev_node_id] = path_idx
 
         if avg_corr > best_avg_corr:
             best_avg_corr = avg_corr
@@ -325,7 +342,7 @@ def build_graph(
         for step_i in range(1, len(best_path)):
             a2 = best_path[step_i]
             is_final = step_i == len(best_path) - 1
-            nid = f"{a2}_p{best_path_idx}_final" if is_final else f"{a2}_p{best_path_idx}_s{step_i}"
+            nid = f"{prev}__{a2}__final" if is_final else f"{prev}__{a2}"
             keep_nodes.add(nid)
             keep_edges.add((prev, nid))
             prev = nid
@@ -338,7 +355,8 @@ def build_graph(
                 G.remove_edge(*e)
 
         image_data_dict = {k: v for k, v in image_data_dict.items() if k in keep_nodes}
-        models = {k: v for k, v in models.items() if k[2] == best_path_idx}
+        best_pairs = {(best_path[i], best_path[i + 1]) for i in range(len(best_path) - 1)}
+        models = {k: v for k, v in models.items() if k in best_pairs}
 
     return G, image_data_dict, models, paths, best_path_idx
 
@@ -348,28 +366,29 @@ def build_graph(
 def visualize(
     G: nx.DiGraph,
     image_data_dict: Dict[str, Tuple[str, float]],
-    output_html: str = DEFAULT_HTML,
+    output_html: str = "regAutomata.html",
     open_html: bool = False,
 ) -> int:
     """
     Render the graph as an interactive HTML file.
-    All layout parameters scale automatically with the number of paths and graph depth.
-    Returns the canvas height in pixels (used by capture_pyvis_html_as_png).
+    All layout parameters scale automatically with the number of paths and depth.
+    Returns the canvas height in pixels (needed by capture_pyvis_html_as_png).
     """
-    num_paths = max(1, sum(1 for n in G.nodes() if "_final" in str(n)))
+    num_paths = max(1, sum(1 for n in G.nodes() if str(n).endswith("_final")))
 
     try:
         max_depth = nx.dag_longest_path_length(G)
     except Exception:
         max_depth = 2
 
-    # All layout values derived from num_paths and max_depth so the graph
-    # never clips or overlaps regardless of dataset size.
-    node_spacing = max(180, min(500, 1600 // num_paths))
-    level_sep    = max(400, min(900, 900 - max_depth * 40))
-    height_px    = max(1000, num_paths * node_spacing + 500)
+    node_spacing = max(250, min(600, 2000 // num_paths))
+    level_sep    = max(300, min(750, 750 - max_depth * 40))
+    # height_px only needs to be large enough for the browser to render all nodes.
+    # PNG capture calls network.fit() before screenshotting, so actual empty
+    # space is eliminated by content-aware crop rather than this formula.
+    height_px    = max(900, num_paths * node_spacing + 300)
     img_size     = max(60,  min(130, 260 // num_paths))
-    font_size    = max(14,  min(30,  img_size // 4))
+    font_size    = max(16,  min(36,  img_size // 4))
 
     print(
         f"[visualize] paths={num_paths}  depth={max_depth}  "
@@ -426,9 +445,10 @@ def visualize(
           "sortMethod": "directed",
           "levelSeparation": {level_sep},
           "nodeSpacing": {node_spacing},
-          "blockShifting": false,
-          "edgeMinimization": false,
-          "parentCentralization": false
+          "treeSpacing": {node_spacing},
+          "blockShifting": true,
+          "edgeMinimization": true,
+          "parentCentralization": true
         }}
       }},
       "physics": {{"enabled": false}},
@@ -442,6 +462,7 @@ def visualize(
       }}
     }}""")
 
+    _ensure_parent_dir(output_html)
     net.write_html(output_html)
     if open_html:
         webbrowser.open("file://" + os.path.realpath(output_html))
@@ -453,18 +474,35 @@ def visualize(
 
 def capture_pyvis_html_as_png(
     html_path: str,
-    out_png: str = "regAutomata_exact.png",
+    out_png: str = "regAutomata.png",
     canvas_height_px: int = 1200,
-    extra_left_px: int = 50,
-    extra_right_px: int = 50,
-    extra_top_px: int = 50,
-    extra_bottom_px: int = 50,
+    pad_h: int = 140,
+    pad_v: int = 60,
     device_scale: int = 2,
-    wait_after_load: float = 0.5,
+    wait_after_load: float = 0.8,
 ) -> str:
     """
     Screenshot a pyvis HTML file to PNG via Playwright.
-    canvas_height_px should be the value returned by visualize().
+
+    Strategy
+    --------
+    1. Load the HTML in a headless browser with a viewport tall enough for
+       vis.js to lay out all nodes (canvas_height_px from visualize()).
+    2. Wait for vis.js to finish drawing (pixel-poll on the canvas).
+    3. Call network.fit({animation:false}) — zooms/pans so all nodes are
+       packed tightly inside the visible canvas area.  This is what eliminates
+       the large empty areas: without fit() vis.js leaves the original
+       hierarchical layout centred in a mostly-blank canvas.
+    4. Screenshot just the <canvas> element (not the full div).
+       The canvas pixel buffer contains exactly what vis.js drew.
+    5. Content-aware crop: find the bounding box of pixels that differ from
+       the canvas background colour (threshold < 230 to catch faint edges
+       and light-coloured scatter plot dots), then re-add pad_h / pad_v.
+       pad_h is wider than pad_v because node labels extend horizontally
+       past the node thumbnail.
+
+    canvas_height_px must equal the value returned by visualize() so the
+    viewport is tall enough for vis.js to complete layout before fit().
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -474,49 +512,66 @@ def capture_pyvis_html_as_png(
         ) from exc
 
     html_uri = Path(html_path).absolute().as_uri()
-    tmp_png = Path("__pyvis_tmp_screenshot.png")
-
-    # Viewport sized to exactly match the canvas — do NOT resize canvas.height
-    # after load, that is a full canvas clear in the HTML5 API.
-    viewport_h = canvas_height_px + extra_top_px + extra_bottom_px + 100
+    tmp_png  = Path("__pyvis_tmp_screenshot.png")
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         context = browser.new_context(
-            viewport={"width": 1920, "height": viewport_h},
+            viewport={"width": 1920, "height": canvas_height_px + 400},
             device_scale_factor=device_scale,
         )
         page = context.new_page()
         page.goto(html_uri)
         page.wait_for_load_state("networkidle")
 
-        # vis.js draws asynchronously — poll pixel data until rendering is done.
+        # vis.js draws asynchronously — wait until the canvas has at least one
+        # non-zero (non-background) pixel.
         page.wait_for_function("""() => {
             const c = document.querySelector('#mynetwork canvas');
             if (!c) return false;
             const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-            return d.some(v => v !== 0);
-        }""", timeout=15000)
+            for (let i = 0; i < d.length; i += 4) {
+                if (d[i] < 250 || d[i+1] < 250 || d[i+2] < 250) return true;
+            }
+            return false;
+        }""", timeout=20000)
 
         time.sleep(wait_after_load)
-        page.screenshot(path=str(tmp_png), full_page=True)
+
+        # network.fit() packs all nodes into the visible canvas area, which
+        # directly removes the empty space that appears when the hierarchical
+        # layout places nodes in a small region of a large canvas.
+        page.evaluate("""() => {
+            if (typeof network !== 'undefined') {
+                network.fit({ animation: false });
+            }
+        }""")
+        # Small pause for the fit() reflow to complete before screenshotting.
+        time.sleep(0.4)
+
+        # Screenshot the <canvas> element — its pixel buffer is exactly what
+        # vis.js drew, with no surrounding div whitespace.
+        page.locator("#mynetwork canvas").screenshot(path=str(tmp_png))
         browser.close()
 
-    im = Image.open(tmp_png).convert("RGBA")
+    # Content-aware crop: threshold at 230 (not 245) to reliably catch faint
+    # grey edges and light-coloured scatter plot points.
+    im  = Image.open(tmp_png).convert("RGB")
+    arr = np.array(im)
 
-    new_w = im.size[0] + extra_left_px + extra_right_px
-    new_h = im.size[1] + extra_top_px + extra_bottom_px
-    canvas = Image.new("RGBA", (new_w, new_h), (255, 255, 255, 255))
-    canvas.paste(im, (extra_left_px, extra_top_px), mask=im)
-    im = canvas
+    non_bg = np.any(arr < 230, axis=2)
+    rows   = np.where(non_bg.any(axis=1))[0]
+    cols   = np.where(non_bg.any(axis=0))[0]
 
-    if im.size[1] > im.size[0]:
-        nw = int(im.size[1] * 1.2)
-        widened = Image.new("RGBA", (nw, im.size[1]), (255, 255, 255, 255))
-        widened.paste(im, ((nw - im.size[0]) // 2, 0), mask=im)
-        im = widened
+    if rows.size and cols.size:
+        top    = max(0,            int(rows[0])  - pad_v)
+        bottom = min(arr.shape[0], int(rows[-1]) + pad_v)
+        left   = max(0,            int(cols[0])  - pad_h)
+        right  = min(arr.shape[1], int(cols[-1]) + pad_h)
+        im = im.crop((left, top, right, bottom))
 
-    im.convert("RGB").save(out_png, format="PNG")
+    _ensure_parent_dir(out_png)
+    im.save(out_png, format="PNG")
     try:
         tmp_png.unlink()
     except Exception:
@@ -535,7 +590,8 @@ def predictRegAutomata(
     save_png_path: Optional[str] = None,
 ) -> Tuple[List[Tuple[str, str, float]], float]:
     """
-    Walk the best path using fitted models, predicting sequentially from x0 at qS.
+    Walk the best path using fitted models, predicting sequentially from x0.
+    artifacts_or_path may be a file path string/Path or an already-loaded dict.
     Returns (sequence of (a1, a2, predicted_value) tuples, final predicted value).
     """
     if isinstance(artifacts_or_path, (str, Path)):
@@ -544,26 +600,23 @@ def predictRegAutomata(
     else:
         artifacts = artifacts_or_path
 
-    models = artifacts["models"]
-    paths = artifacts["paths"]
-    best_idx = artifacts["best_path_index"]
-    G = artifacts["G"].copy()
+    models    = artifacts["models"]
+    paths     = artifacts["paths"]
+    best_idx  = artifacts["best_path_index"]
+    G         = artifacts["G"].copy()
     image_data_dict = copy.copy(artifacts["image_data_dict"])
 
     if best_idx is None:
         raise ValueError("Artifacts contain no best_path_index.")
 
     path = paths[best_idx]
-    cur = float(x0)
+    cur  = float(x0)
     seq: List[Tuple[str, str, float]] = []
-    node_values: Dict[str, float] = {path[0]: cur}
+    node_values: Dict[str, float]     = {path[0]: cur}
 
     for step_i in range(1, len(path)):
         a1, a2 = path[step_i - 1], path[step_i]
-        key = (a1, a2, best_idx)
-        model_entry = models.get(key) or next(
-            (v for k, v in models.items() if k[0] == a1 and k[1] == a2), None
-        )
+        model_entry = models.get((a1, a2))
         if model_entry is None:
             raise KeyError(f"No regression model found for edge ({a1} -> {a2}).")
 
@@ -574,7 +627,10 @@ def predictRegAutomata(
 
     for node_id in list(G.nodes):
         for attr, val in node_values.items():
-            if node_id.startswith(attr + "_p") or node_id == attr:
+            if (node_id == attr
+                    or f"__{attr}__" in node_id
+                    or node_id.endswith(f"__{attr}")
+                    or node_id.endswith(f"__{attr}__final")):
                 lines = G.nodes[node_id].get("label", attr).split("\n")
                 attr_line = next((l for l in lines if l.strip()), attr)
                 rest = [l for l in lines if l.startswith("μ") or l.startswith("RMSE")]
@@ -588,9 +644,8 @@ def predictRegAutomata(
                 save_html,
                 out_png=save_png_path,
                 canvas_height_px=canvas_h,
-                extra_left_px=80,
-                extra_right_px=80,
-                extra_bottom_px=80,
+                pad_h=140,
+                pad_v=60,
                 device_scale=2,
             )
 
@@ -619,33 +674,50 @@ def run_regAutomata(
     regression_type: str = "linear",
     correlation_method: Optional[str] = None,
     visualization_type: str = "full",
-    output_html: str = DEFAULT_HTML,
+    output_dir: Optional[str] = None,
     open_html: bool = False,
-    save_artifacts_path: Optional[str] = None,
     save_png: bool = False,
     png_kwargs: Optional[Dict] = None,
     use_prefilter: bool = True,
 ) -> Dict:
     """
-    End-to-end pipeline: load CSV -> pre-filter pairs -> build graph -> visualise -> save artifacts.
+    End-to-end pipeline: load CSV -> pre-filter -> build graph -> visualise -> save.
+
+    Creates one self-contained folder per run:
+        {output_dir}/{dataset}__{qS}_to_{qF}__{regression}/
+            graph.html          — full graph, interactive
+            graph.png           — full graph PNG  (if save_png=True)
+            graph_best.html     — best-path graph, interactive
+            graph_best.png      — best-path graph PNG  (if save_png=True)
+            artifacts.pkl       — full artifacts
+            artifacts_best.pkl  — best-path artifacts (used by predictRegAutomata)
+
+    Scatter PNGs are written to _tmp/ inside the run folder, encoded to base64,
+    then _tmp/ is deleted before the function returns.
+
+    The returned dict includes a "run_dir" key with the path to the run folder,
+    so downstream code can locate artifacts without re-constructing the path.
 
     Parameters
     ----------
-    dataset_csv        : path to CSV file
-    qS                 : source attribute (initial state)
-    qF                 : target attribute (final state)
-    regression_type    : one of SUPPORTED_REGRESSION
-    correlation_method : one of SUPPORTED_CORRELATION (auto-selected if None)
-    visualization_type : "full" | "best"
-    output_html        : path for the interactive HTML output
-    open_html          : open browser after generation
-    save_artifacts_path: pickles full artifacts and a *_best.pkl variant
-    save_png           : capture HTML to PNG via Playwright
-    png_kwargs         : extra kwargs forwarded to capture_pyvis_html_as_png
-    use_prefilter      : remove low-correlation pairs before path generation
+    dataset_csv      : path to CSV file
+    qS               : source attribute (initial state)
+    qF               : target attribute (final state)
+    regression_type  : one of SUPPORTED_REGRESSION
+    correlation_method : one of SUPPORTED_CORRELATION  (auto-selected if None)
+    visualization_type : "full" | "best"  — scope of the returned full graph
+    output_dir       : root results folder  (default: "regAutomata_results")
+    open_html        : open browser after generation
+    save_png         : capture HTML to PNG via Playwright
+    png_kwargs       : extra kwargs forwarded to capture_pyvis_html_as_png
+                       (e.g. pad_h, pad_v, device_scale, wait_after_load)
+    use_prefilter    : remove low-correlation pairs before path generation
     """
     if regression_type not in SUPPORTED_REGRESSION:
-        raise ValueError(f"regression_type {regression_type!r} not supported. Choose from {SUPPORTED_REGRESSION}")
+        raise ValueError(
+            f"regression_type {regression_type!r} not supported. "
+            f"Choose from {SUPPORTED_REGRESSION}"
+        )
 
     df = pd.read_csv(dataset_csv)
     missing = [c for c in (qS, qF) if c not in df.columns]
@@ -654,6 +726,16 @@ def run_regAutomata(
 
     if correlation_method is None:
         correlation_method = REGRESSION_CORR_DEFAULTS[regression_type]
+
+    ds_stem  = Path(dataset_csv).stem
+    qs_safe  = qS.replace(" ", "_").replace("/", "_")
+    qf_safe  = qF.replace(" ", "_").replace("/", "_")
+    run_name = f"{ds_stem}__{qs_safe}_to_{qf_safe}__{regression_type}"
+
+    run_dir = (Path(output_dir) if output_dir else RESULTS_DIR) / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir = run_dir / "_tmp"
+    tmp_dir.mkdir(exist_ok=True)
 
     allowed_pairs: Optional[Set[Tuple[str, str]]] = None
     if use_prefilter:
@@ -666,71 +748,88 @@ def run_regAutomata(
                 allowed_pairs.add((qS, col))
         allowed_pairs.add((qS, qF))
         n_possible = len(num_cols) * (len(num_cols) - 1)
-        print(f"[prefilter] {len(allowed_pairs)}/{n_possible} directed pairs retained (threshold=(max+mean)/2 of |corr|)")
+        print(
+            f"[prefilter] {len(allowed_pairs)}/{n_possible} directed pairs retained "
+            f"(threshold=(max+mean)/2 of |corr|)"
+        )
 
-    G_full, image_data_full, models_full, paths_full, best_path_idx = build_graph(
+    # ── Full graph ────────────────────────────────────────────────────────────
+    G_full, img_full, models_full, paths_full, best_idx = build_graph(
         df, qS, qF, correlation_method, regression_type,
-        visualization_type="full",
+        visualization_type=visualization_type,
         allowed_pairs=allowed_pairs,
+        tmp_dir=tmp_dir,
     )
 
     print(
         f"[build_graph] {len(paths_full)} paths explored | "
-        f"best path index: {best_path_idx} | "
-        f"path: {paths_full[best_path_idx] if best_path_idx is not None else 'N/A'}"
+        f"best index: {best_idx} | "
+        f"path: {paths_full[best_idx] if best_idx is not None else 'N/A'}"
     )
 
-    canvas_h = visualize(G_full, image_data_full, output_html=output_html, open_html=open_html)
+    html_full  = str(run_dir / "graph.html")
+    canvas_h_full = visualize(G_full, img_full, output_html=html_full, open_html=open_html)
 
     artifacts_full: Dict = {
-        "G": G_full,
-        "image_data_dict": image_data_full,
-        "models": models_full,
-        "paths": paths_full,
-        "best_path_index": best_path_idx,
-        "qS": qS,
-        "qF": qF,
-        "regression_type": regression_type,
+        "G":                  G_full,
+        "image_data_dict":    img_full,
+        "models":             models_full,
+        "paths":              paths_full,
+        "best_path_index":    best_idx,
+        "qS":                 qS,
+        "qF":                 qF,
+        "regression_type":    regression_type,
         "correlation_method": correlation_method,
-        "visualization_type": "full",
-        "dataset_csv": dataset_csv,
-        "allowed_pairs": allowed_pairs,
+        "visualization_type": visualization_type,
+        "dataset_csv":        dataset_csv,
+        "allowed_pairs":      allowed_pairs,
+        "run_dir":            str(run_dir),
     }
+    save_artifacts(artifacts_full, str(run_dir / "artifacts.pkl"))
 
-    if save_artifacts_path:
-        save_artifacts(artifacts_full, save_artifacts_path)
+    # ── Best-path graph ───────────────────────────────────────────────────────
+    G_best, img_best, models_best, paths_best, _ = build_graph(
+        df, qS, qF, correlation_method, regression_type,
+        visualization_type="best",
+        allowed_pairs=allowed_pairs,
+        tmp_dir=tmp_dir,
+    )
 
-        base, ext = os.path.splitext(save_artifacts_path)
-        best_pkl = f"{base}_best{ext}"
+    # All scatter PNGs are now encoded in memory — delete _tmp/.
+    shutil.rmtree(tmp_dir, ignore_errors=True)
 
-        G_best, image_best, models_best, paths_best, _ = build_graph(
-            df, qS, qF, correlation_method, regression_type,
-            visualization_type="best",
-            allowed_pairs=allowed_pairs,
-        )
-        artifacts_best: Dict = {
-            **artifacts_full,
-            "G": G_best,
-            "image_data_dict": image_best,
-            "models": models_best,
-            "paths": paths_best,
-            "visualization_type": "best",
-        }
-        save_artifacts(artifacts_best, best_pkl)
-        print(f"[artifacts] saved: {save_artifacts_path}  |  best: {best_pkl}")
+    html_best    = str(run_dir / "graph_best.html")
+    canvas_h_best = visualize(G_best, img_best, output_html=html_best, open_html=False)
 
+    artifacts_best: Dict = {
+        **artifacts_full,
+        "G":                  G_best,
+        "image_data_dict":    img_best,
+        "models":             models_best,
+        "paths":              paths_best,
+        "visualization_type": "best",
+    }
+    save_artifacts(artifacts_best, str(run_dir / "artifacts_best.pkl"))
+    print(
+        f"[artifacts] {run_dir / 'artifacts.pkl'}  |  "
+        f"best: {run_dir / 'artifacts_best.pkl'}"
+    )
+
+    # ── PNG capture ───────────────────────────────────────────────────────────
     if save_png:
-        kwargs = {
-            "canvas_height_px": canvas_h,
-            "extra_left_px": 50,
-            "extra_right_px": 50,
-            "extra_top_px": 50,
-            "extra_bottom_px": 50,
-            "device_scale": 2,
-        }
+        kw: Dict = {"pad_h": 140, "pad_v": 60, "device_scale": 2}
         if png_kwargs:
-            kwargs.update(png_kwargs)
+            kw.update(png_kwargs)
         time.sleep(0.2)
-        capture_pyvis_html_as_png(output_html, **kwargs)
+        capture_pyvis_html_as_png(
+            html_full, out_png=str(run_dir / "graph.png"),
+            canvas_height_px=canvas_h_full, **kw,
+        )
+        capture_pyvis_html_as_png(
+            html_best, out_png=str(run_dir / "graph_best.png"),
+            canvas_height_px=canvas_h_best, **kw,
+        )
+        print(f"[png] {run_dir / 'graph.png'}  |  {run_dir / 'graph_best.png'}")
 
+    print(f"[done] {run_dir}")
     return artifacts_full
